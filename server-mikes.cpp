@@ -26,7 +26,7 @@ const int server_backlog = 8;
 
 // A single read from the socket may return this amount of data
 // A single send may transfer this amount of data
-const size_t buffer_size = 64;
+const size_t kTransferBufferSize = 64;
 
 
 
@@ -45,21 +45,21 @@ enum EConnState{
  */
 struct ConnectionData
 {
-	EConnState state; // state of the connection; see EConnState enum
+    EConnState state; // state of the connection; see EConnState enum
 
-	int sock; // file descriptor of the connections socket.
+    int sock; // file descriptor of the connections socket.
 
-	// items related to buffering.
-	size_t bufferOffset, bufferSize; 
-	char buffer[buffer_size+1];
+    // items related to buffering.
+    size_t bufferOffset, bufferSize; 
+    char buffer[kTransferBufferSize+1];
 };
 
-// Prototypes
 
+// Prototypes
 static int setup_server_socket( short port );
 static bool set_socket_nonblocking( int fd );
 static bool process_client_send( ConnectionData& cd );
-static bool process_client_recv( ConnectionData& cd , fd_set& master_fds );
+static bool process_client_recv( ConnectionData& cd );
 
 int main( int arg_count, char* arguments[] ){
 	int current_server_port = server_port;
@@ -73,73 +73,100 @@ int main( int arg_count, char* arguments[] ){
 		return 1;
 	}
     	
-	fd_set master_fds; 
-    	fd_set temp_fds;  
-    	int fd_count;
+	std::vector<ConnectionData> connections;
 
-	FD_SET(listenfd, &master_fds); // add listening socket to master
 
-   	// keep track of the highest file descriptor
-    	fd_count = listenfd; // so far we only have one.
+    	fd_set read_fds; // set of file descriptors for reading the listening socket
+	fd_set write_fds; // set of file descriptors for writing
 
-	int i;
+	int fd_max; // we want to store which socket is the highest one since select() needs it
+	fd_max = listenfd; // from the beginning we only have this one
 
-	while (1){
-		temp_fds = master_fds; // Copy master fd set to a temporary one
-		
-		if(select(fd_count+1, &temp_fds, NULL, NULL, NULL) == -1){
+	// empty the sets
+	FD_ZERO(&read_fds); 
+	FD_ZERO(&write_fds);
+	
+	FD_SET(listenfd, &read_fds); // add listening socket to reads
+
+	while(1){
+
+		if(select(fd_max+1, &read_fds, &write_fds, NULL, NULL) == -1){
     			perror("select() error");
     			exit(1);
 		}
 		printf("select() ok\n");
 
-		sockaddr_in clientAddr;
-		socklen_t addrSize = sizeof(clientAddr);
+        	sockaddr_in clientAddr;
+	        socklen_t addrSize = sizeof(clientAddr);		
 
-		/*run through the connections, see if new incoming, or if anyone is sending data*/
-		for(i = 0; i <= fd_count; i++ ){
-    			if(FD_ISSET(i, &temp_fds)) { /* we got one... */
-				if(i == listenfd){ /* handle new connections */
-					// accept a single incoming connection
-					int client_fd = accept( listenfd, (sockaddr*)&clientAddr, &addrSize );
+		if (FD_ISSET(listenfd,&read_fds)){ // check if the listening socket is in the read_fds set. If so, a client wants to connect.
+			int client_fd = accept( listenfd, (sockaddr*)&clientAddr, &addrSize );
 					if( client_fd == -1 ){
 						perror( "accept() failed" );
-						continue; // We go on and try with other clients if any
+						continue; // we go on and try with other clients if any
 					}else{
-						FD_SET(client_fd,&master_fds);
 
-						if(client_fd > fd_count){ /* Keep track of which one is the highest */
-				   			fd_count = client_fd;
-						}
+						ConnectionData connData; // create a connData object that we will store in connections vector
+						memset( &connData, 0, sizeof(connData) );
+
+						connData.sock = client_fd; // add the newly accepted client
+						connData.state = eConnStateReceiving;
+
+						connections.push_back(connData); // add the object to the vector
 
 						printf("Accepted new connection from %s, socket %d\n", inet_ntoa(clientAddr.sin_addr), client_fd);
 
 					}
-				}else{ // Another socket (not listenfd)
-					// initialize connection data
-					ConnectionData connData;
-					memset( &connData, 0, sizeof(connData) );
+		}	
 
-					connData.sock = i;
-					connData.state = eConnStateReceiving;
-					if (FD_ISSET(i,&master_fds)){
-						process_client_recv( connData , master_fds ); // Receive the data
-					}
-						
-			
-					if (FD_ISSET(i,&master_fds)){	
-						process_client_send( connData ); // We have received data, now send it back
-					}
+	// loop through the connectionData objects and check if any wants to perform an action
+        for (std::vector<ConnectionData>::iterator it = connections.begin(); it < connections.end(); it++ ){
+            
+		ConnectionData &connData = *it;
+        bool processFurther = true;
 
-					
+		if (FD_ISSET(connData.sock, &read_fds)){
+			processFurther = process_client_recv( connData ); // Receive the data
+			FD_CLR(connData.sock, &read_fds); // Clear the socket now since it shouldn't read from this one again
+		}
 
-				} // End if (i == list...
-			} // End if (FD_ISSET....
-		} // End for
+		if (FD_ISSET(connData.sock, &write_fds)){
+			processFurther = process_client_send( connData ); // Send the data
+			FD_CLR(connData.sock, &write_fds);
+		}
 
+		if (!processFurther){ // if something bad happened we will close the connection
+			close(connData.sock); 
+			it = connections.erase(it);
+		}	
+	}	
 
-	} // end while
-    	
+	// loop through the connectionData objects again
+	// and update the sets if needed
+	for (std::vector<ConnectionData>::iterator it = connections.begin(); it < connections.end(); it++ ){
+
+		ConnectionData &connData = *it;
+		fd_max = listenfd;
+		if (connData.state == eConnStateReceiving){
+			FD_SET(connData.sock, &read_fds);
+		}
+
+		if (connData.state == eConnStateSending){
+			FD_SET(connData.sock, &write_fds);
+		}
+
+		if (connData.sock >= fd_max){
+			fd_max = connData.sock;
+		}
+
+	        FD_SET(listenfd, &read_fds); // we need to add listenfd again to be able to listen for new connections		
+	}
+
+	
+
+		
+	}    	
+
 
     return 0;	
 		
@@ -224,64 +251,81 @@ static bool set_socket_nonblocking( int fd ){
 	return true;
 }
 
-static bool process_client_send( ConnectionData& cd ){
+//--    process_client_recv()   ///{{{1///////////////////////////////////////
+static bool process_client_recv( ConnectionData& cd )
+{
+    assert( cd.state == eConnStateReceiving );
 
-	// send as much data as possible from buffer
-	ssize_t ret = send( cd.sock, 
-		cd.buffer+cd.bufferOffset, 
-		cd.bufferSize-cd.bufferOffset,
-		MSG_NOSIGNAL // suppress SIGPIPE signals, generate EPIPE instead
-	);
+    // receive from socket
+    ssize_t ret = recv( cd.sock, cd.buffer, kTransferBufferSize, 0 );
 
-	if( ret == -1 ){
-		printf( "  socket %d - error on send: '%s'\n", cd.sock, strerror(errno) );
-		fflush( stdout );
-		return false;
-	}
+    if( 0 == ret )
+    {
+#		if VERBOSE
+        printf( "  socket %d - orderly shutdown\n", cd.sock );
+        fflush( stdout );
+#		endif
 
-	// update buffer data
-	cd.bufferOffset += ret;
+        return false;
+    }
 
-	// did we finish sending all data
-	if( cd.bufferOffset == cd.bufferSize ){
-		// if so, transition to receiving state again
-		cd.bufferSize = 0;
-		cd.bufferOffset = 0;
-		cd.state = eConnStateReceiving;
-	}
+    if( -1 == ret )
+    {
+#		if VERBOSE
+        printf( "  socket %d - error on receive: '%s'\n", cd.sock,
+                strerror(errno) );
+        fflush( stdout );
+#		endif
 
-	return true;
+        return false;
+    }
+
+    // update connection buffer
+    cd.bufferSize += ret;
+
+    // zero-terminate received data
+    cd.buffer[cd.bufferSize] = '\0';
+
+    // transition to sending state
+    cd.bufferOffset = 0;
+    cd.state = eConnStateSending;
+    return true;
 }
 
-static bool process_client_recv( ConnectionData& cd, fd_set& master_fds ){
-	assert( cd.state == eConnStateReceiving );
-	// receive from socket
-	ssize_t ret = recv( cd.sock, cd.buffer, buffer_size, 0 );
+//--    process_client_send()   ///{{{1///////////////////////////////////////
+static bool process_client_send( ConnectionData& cd )
+{
+    assert( cd.state == eConnStateSending );
 
-	if( 0 == ret ){
-		printf( "  socket %d - orderly shutdown\n", cd.sock );
-		fflush( stdout );
-		close(cd.sock);
-		FD_CLR(cd.sock,&master_fds);
+    // send as much data as possible from buffer
+    ssize_t ret = send( cd.sock, 
+                        cd.buffer+cd.bufferOffset, 
+                        cd.bufferSize-cd.bufferOffset,
+                        MSG_NOSIGNAL // suppress SIGPIPE signals, generate EPIPE instead
+        );
 
-		return false;
-	}
+    if( -1 == ret )
+    {
+#		if VERBOSE
+        printf( "  socket %d - error on send: '%s'\n", cd.sock, 
+                strerror(errno) );
+        fflush( stdout );
+#		endif
 
-	if( -1 == ret ){
-		printf( "  socket %d - error on receive: '%s'\n", cd.sock, strerror(errno) );
-		fflush( stdout );
+        return false;
+    }
 
-		return false;
-	}
+    // update buffer data
+    cd.bufferOffset += ret;
 
-	// update connection buffer
-	cd.bufferSize += ret;
+    // did we finish sending all data
+    if( cd.bufferOffset == cd.bufferSize )
+    {
+        // if so, transition to receiving state again
+        cd.bufferSize = 0;
+        cd.bufferOffset = 0;
+        cd.state = eConnStateReceiving;
+    }
 
-	// zero-terminate received data
-	cd.buffer[cd.bufferSize] = '\0';
-
-	// transition to sending state
-	cd.bufferOffset = 0;
-	cd.state = eConnStateSending;
-	return true;
+    return true;
 }
