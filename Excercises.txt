@@ -1,0 +1,39 @@
+1.
+
+The concurrent server responds with a round trip time of around 0.1 ms when running on a local computer.
+
+The new connections appear as established and are connected to a unique socket at the server. See netstat status below:
+
+Proto Recv-Q Send-Q Local Address           Foreign Address         State    	PID/Program name  
+tcp        0      0 localhost:5000          localhost:59887         ESTABLISHED 1848/server     
+tcp        0      0 localhost:59887         localhost:5000          ESTABLISHED 2040/client-simple
+tcp        0      0 localhost:59886         localhost:5000          ESTABLISHED 1935/client-simple
+tcp        0      0 localhost:5000          localhost:59886         ESTABLISHED 1848/server   
+
+
+2.
+
+Simulating 100 clients with 1000 queries with the concurrent server:
+
+
+Establishing 100 connections... 
+  successfully initiated 100 connection attempts!
+Connect timing results for 100 successful connections
+  - min time: 11.929699 ms
+  - max time: 19.660506 ms
+  - average time: 14.598906 ms
+ (0 connections failed!)
+Roundtrip timing results for 100 connections for 1000 round trips
+  - min time: 587.213365 ms
+  - max time: 884.338289 ms
+  - average time: 875.021400 ms
+
+This is way faster than before when using the non-improved server.
+The average connect timing is now 14 ms compared to 5290 ms
+The average RTT is now 875 compared to 3873 ms
+
+3.
+
+A simple client is still able to connect and send/receive data even when the multi client is running with
+a large sample of connections (1000) and a large amount of queries (10000).
+Therefore we can say that the server is now safe from the simple DOS attack.
