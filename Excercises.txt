@@ -34,6 +34,6 @@ The average RTT is now 875 compared to 3873 ms
 
 3.
 
-A simple client is still able to connect and send/receive data even when the multi client is running with
-a large sample of connections (1000) and a large amount of queries (10000).
-Therefore we can say that the server is now safe from the simple DOS attack.
+A client cannot deny another client access to the server simply by being connected
+to the server. Even an active multi-client with 1000 connections doing 100 queries
+would not flood the server enough as to make a successfull denial of service attack.
